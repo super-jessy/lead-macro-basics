@@ -1,0 +1,33 @@
+start: "2016-01-01"
+
+series:
+  # Труд/занятость
+  - { code: ICSA,      freq: W,  desc: "Initial Jobless Claims (weekly)" }
+  - { code: AWHMAN,    freq: ME, desc: "Avg Weekly Hours, Manufacturing" }
+  - { code: CES6054890001, freq: ME, desc: "Temporary Help Services Employment (BLS CES)" }
+
+  # Заказы/производство
+  - { code: AMTMNO,    freq: ME, desc: "Manufacturers' New Orders: Total Manufacturing" }
+  - { code: DGORDER,   freq: ME, desc: "Durable Goods New Orders" }
+  - { code: NEWORDER, freq: ME, desc: "New Orders: Nondefense Capital Goods ex Aircraft" }
+
+  # Жильё/строительство
+  - { code: HOUST,     freq: ME, desc: "Housing Starts: Total" }
+  - { code: PERMITS,   freq: ME, desc: "Building Permits: Total" }
+  - { code: PERMIT1,   freq: ME, desc: "Building Permits: 1-Unit Structures" }
+  - { code: HSN1F,     freq: ME, desc: "New One Family Houses Sold" }
+
+  # Кривые/ставки/спрэды
+  - { code: T10Y3M,    freq: D,  desc: "10Y minus 3M Treasury Spread" }
+  - { code: T10Y2Y,    freq: D,  desc: "10Y minus 2Y Treasury Spread" }
+  - { code: T10YFF,    freq: D,  desc: "10Y minus Fed Funds Rate" }
+
+  # Финансовые условия
+  - { code: NFCI,      freq: W,  desc: "Chicago Fed National Financial Conditions Index" }
+  - { code: ANFCI,     freq: W,  desc: "Adjusted NFCI (risk-only)" }
+
+  # Ожидания/настроения
+  - { code: UMCSENT,   freq: ME, desc: "Univ. of Michigan: Consumer Sentiment" }
+
+  # Сводный лид-индекс
+  - { code: USSLIND,   freq: ME, desc: "Leading Index for the US (Philly Fed)" }
