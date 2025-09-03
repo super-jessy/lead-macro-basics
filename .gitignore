@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+
+# MacOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+output/
+data/
+
+# Пакеты и сборка
+poetry.lock
+dist/
+build/

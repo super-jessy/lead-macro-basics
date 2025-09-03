@@ -1,0 +1,9 @@
+pandas>=2.2
+numpy>=1.26
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
+PyYAML>=6.0
+pandas-datareader>=0.10
+yfinance>=0.2.40
+plotly>=5.23
+python-dotenv>=1.0
