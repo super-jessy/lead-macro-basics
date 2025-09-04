@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>${page_title}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Актуальная версия plotly -->
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <style>
+    :root { --pad: 16px; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: var(--pad); }
+    .tabs { display:flex; gap:8px; margin:8px 0 12px; flex-wrap:wrap; }
+    .tab { padding:6px 10px; border:1px solid #ccc; border-radius:8px; cursor:pointer; user-select:none; }
+    .tab.active { background:#1f77b4; color:#fff; border-color:#1f77b4; }
+    .panel { display:none; }
+    .panel.active { display:block; }
+    .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:8px 0 12px; }
+    .muted { font-size:12px; opacity:.7; }
+    #fig_timeseries, #fig_heatmap, #fig_ic { height: 72vh; } /* поч почти полный экран */
+    #errorBox { color:#b00020; white-space: pre-wrap; background:#ffecec; border:1px solid #ffb3b3; padding:8px 10px; border-radius:8px; display:none; }
+    .plotly .gl-container .gl-error-message { display: none !important; } /* прячем webgl warning */
+    @media (max-width: 640px) { #fig_timeseries, #fig_heatmap, #fig_ic { height: 66vh; } }
+  </style>
+</head>
+<body>
+
+<h2 style="margin:4px 0 12px 0;">${h1_title}</h2>
+<div id="errorBox"></div>
+
+<div class="tabs">
+  <div class="tab active" data-target="panel-timeseries">Timeseries</div>
+  <div class="tab" data-target="panel-heatmap">Heatmap</div>
+  <div class="tab" data-target="panel-ic">IC</div>
+  <div class="tab" data-target="panel-models">Models (soon)</div>
+</div>
+
+<!-- Timeseries -->
+<div id="panel-timeseries" class="panel active">
+  <div class="controls">
+    <label>Индикатор:
+      <select id="macroSelect" style="margin-left:6px; padding:2px 6px;"></select>
+    </label>
+    <label>Нормировка:
+      <input type="checkbox" id="normChk" style="transform: translateY(2px); margin:0 6px;"> z-score
+    </label>
+    <label>Лаг (мес): <span id="lagVal">0</span>
+      <input type="range" id="lagRange" min="-12" max="12" step="1" value="0" style="vertical-align: middle; margin-left:8px;">
+    </label>
+    <span class="muted">Положительный лаг сдвигает макро вправо (позже).</span>
+  </div>
+  <div id="fig_timeseries"></div>
+</div>
+
+<!-- Heatmap -->
+<div id="panel-heatmap" class="panel">
+  <div class="muted">Выбор индикатора на вкладке Timeseries влияет на IC-вкладку ниже.</div>
+  <div id="fig_heatmap"></div>
+</div>
+
+<!-- IC -->
+<div id="panel-ic" class="panel">
+  <div class="controls">
+    <label for="icSelect">Индикатор:</label>
+    <select id="icSelect"></select>
+  </div>
+  <div id="fig_ic"></div>
+</div>
+
+<!-- Models -->
+<div id="panel-models" class="panel">
+  <p class="muted">Здесь позже появятся модели и метрики.</p>
+</div>
+
+<!-- Серверные данные, ВАЛИДНЫЙ JSON -->
+<script id="spx-code" type="application/json">${spx_code_json}</script>
+<script id="default-code" type="application/json">${default_code_json}</script>
+<script id="macro-data" type="application/json">${macro_payload_json}</script>
+<script id="ts-figure" type="application/json">${ts_fig_json}</script>
+<script id="hm-figure" type="application/json">${hm_fig_json}</script>
+<script id="ic-payload" type="application/json">${ic_payload_json}</script>
+<script id="ic-figure" type="application/json">${ic_fig_json}</script>
+
+<script>
+  function showError(e) {
+    const box = document.getElementById('errorBox');
+    box.style.display = 'block';
+    box.textContent = (e && e.stack) ? e.stack : String(e);
+    console.error(e);
+  }
+
+  function getJSON(id) {
+    const el = document.getElementById(id);
+    return el ? JSON.parse(el.textContent) : null;
+  }
+
+  try {
+    const spxCode      = getJSON('spx-code');        // строка, например "^GSPC"
+    const defaultCode  = getJSON('default-code');    // строка
+    const macroData    = getJSON('macro-data');      // { CODE: {ts, raw, z}, ... }
+    const tsFigureSpec = getJSON('ts-figure');       // spec dict
+    const hmFigureSpec = getJSON('hm-figure');       // spec dict
+    const icPayload    = getJSON('ic-payload');      // { CODE: {lags, ic}, ... }
+    const icFigureSpec = getJSON('ic-figure');       // spec dict
+
+    // Tabs
+    document.querySelectorAll('.tab').forEach(t => {
+      t.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        t.classList.add('active');
+        document.getElementById(t.dataset.target).classList.add('active');
+
+        if (t.dataset.target === 'panel-heatmap' && !window.__hmRendered) {
+          Plotly.newPlot('fig_heatmap', hmFigureSpec.data, hmFigureSpec.layout, {responsive:true});
+          window.__hmRendered = true;
+        }
+        if (t.dataset.target === 'panel-ic' && !window.__icRendered) {
+          Plotly.newPlot('fig_ic', icFigureSpec.data, icFigureSpec.layout, {responsive:true});
+          window.__icRendered = true;
+          updateIC(icSelect.value);
+        }
+      });
+    });
+
+    // Заполняем селекторы
+    const macroSelect = document.getElementById('macroSelect');
+    Object.keys(macroData).sort().forEach(code => {
+      const opt = document.createElement('option');
+      opt.value = code; opt.textContent = code;
+      if (code === defaultCode) opt.selected = true;
+      macroSelect.appendChild(opt);
+    });
+
+    const icSelect = document.getElementById("icSelect");
+    Object.keys(macroData).sort().forEach(code => {
+      const opt = document.createElement("option");
+      opt.value = code; opt.textContent = code;
+      icSelect.appendChild(opt);
+    });
+    icSelect.value = defaultCode;
+    icSelect.addEventListener("change", () => updateIC(icSelect.value));
+
+    // Рисуем таймсирию
+    Plotly.newPlot('fig_timeseries', tsFigureSpec.data, tsFigureSpec.layout, {responsive:true});
+
+    // ===== helpers =====
+    function addMonthsISO(iso, m) {
+      const d = new Date(iso);
+      let year = d.getUTCFullYear();
+      let month = d.getUTCMonth();
+      const day = d.getUTCDate();
+      month += m; year += Math.floor(month/12); month = ((month%12)+12)%12;
+      const nd = new Date(Date.UTC(year, month, 1));
+      const daysInMonth = new Date(Date.UTC(year, month+1, 0)).getUTCDate();
+      nd.setUTCDate(Math.min(day, daysInMonth));
+      return nd.toISOString();
+    }
+    function withLag(tsArr, m){ if(!m) return tsArr; return tsArr.map(t => addMonthsISO(t, m)); }
+    function legendName(state){
+      const suffix = [];
+      if (state.z)   suffix.push('z');
+      if (state.lag) suffix.push('lag ' + (state.lag>0? '+'+state.lag: state.lag) + 'm');
+      return state.code + (suffix.length? ' ('+suffix.join(', ')+')' : '');
+    }
+    function currentState() {
+      return {
+        code: document.getElementById('macroSelect').value,
+        z: document.getElementById('normChk').checked,
+        lag: parseInt(document.getElementById('lagRange').value, 10) || 0,
+      };
+    }
+
+    // Апдейт таймсерии
+    function applyState(st) {
+      const rec = macroData[st.code]; if(!rec) return;
+      const y = st.z ? rec.z : rec.raw;
+      const x = withLag(rec.ts, st.lag);
+      const nm = legendName(st);
+      try {
+        Plotly.restyle('fig_timeseries', { x:[x], y:[y], name:[nm], 'yaxis':['y2'] }, [1]);
+        Plotly.relayout('fig_timeseries', {
+          'title.text': spxCode + ' (лог) и ' + nm,
+          'yaxis2.title.text': st.code + (st.z ? ' (z-score)' : '')
+        });
+        document.getElementById('lagVal').textContent = String(st.lag);
+      } catch (e) { showError(e); }
+    }
+
+    // Апдейт IC
+    function updateIC(code){
+      const item = icPayload[code];
+      if (!item) return;
+      if (!window.__icRendered) return;
+      try {
+        Plotly.react('fig_ic',
+          [{ x: item.lags, y: item.ic, mode: 'lines+markers', name: 'IC' }],
+          { ...icFigureSpec.layout, title: {text: 'Information Coefficient (next-month return) — ' + code} },
+          {responsive:true}
+        );
+      } catch(e){ showError(e); }
+    }
+
+    // Слушатели
+    macroSelect.addEventListener('change', ()=>{ const st=currentState(); applyState(st); updateIC(st.code); });
+    document.getElementById('normChk').addEventListener('change', ()=>applyState(currentState()));
+    document.getElementById('lagRange').addEventListener('input', ()=>applyState(currentState()));
+
+    // Стартовое состояние
+    applyState(currentState());
+
+  } catch (e) {
+    showError(e);
+  }
+</script>
+
+</body>
+</html>
