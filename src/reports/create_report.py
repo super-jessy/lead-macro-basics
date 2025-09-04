@@ -1,4 +1,5 @@
 # src/reports/create_report.py
+
 import os
 import json
 from string import Template
@@ -19,13 +20,15 @@ def load_spx_from_db() -> Tuple[pd.DataFrame, str]:
     """Вернёт df с ценой индекса и код (^GSPC или SPY)."""
     eng = get_engine()
     with eng.connect() as c:
-        q = text("""
+        q = text(
+            """
             select p.ts, coalesce(p.adj_close, p.close) as px, s.code as asset_code
             from core.price p
             join core.series s using(series_id)
             where s.code in ('^GSPC','SPY')
             order by ts
-        """)
+            """
+        )
         df = pd.read_sql(q, c)
 
     if df.empty:
@@ -41,13 +44,17 @@ def load_spx_from_db() -> Tuple[pd.DataFrame, str]:
 def get_macro_codes_from_db() -> List[str]:
     eng = get_engine()
     with eng.connect() as c:
-        rows = c.execute(text("""
-            select s.code
-            from core.series s
-            where s.asset_class='macro'
-              and exists (select 1 from core.observation o where o.series_id=s.series_id)
-            order by s.code
-        """)).fetchall()
+        rows = c.execute(
+            text(
+                """
+                select s.code
+                from core.series s
+                where s.asset_class='macro'
+                  and exists (select 1 from core.observation o where o.series_id=s.series_id)
+                order by s.code
+                """
+            )
+        ).fetchall()
     return [r.code for r in rows]
 
 
@@ -66,13 +73,15 @@ def load_macro_series_payload() -> Tuple[Dict[str, dict], str]:
     for code in get_macro_codes_from_db():
         with eng.connect() as c:
             df = pd.read_sql(
-                text("""
+                text(
+                    """
                     select o.ts, o.value
                     from core.observation o
                     join core.series s using(series_id)
                     where s.code=:code
                     order by o.ts
-                """),
+                    """
+                ),
                 c,
                 params={"code": code},
             )
@@ -88,7 +97,7 @@ def load_macro_series_payload() -> Tuple[Dict[str, dict], str]:
         payload[code] = {
             "ts": [pd.Timestamp(t).isoformat() for t in df["ts"]],
             "raw": [float(x) if x is not None else None for x in v],
-            "z":   [float(x) if x is not None else None for x in z],
+            "z": [float(x) if x is not None else None for x in z],
         }
         if default_code is None or code == "ICSA":
             default_code = code
@@ -102,10 +111,10 @@ def load_macro_series_payload() -> Tuple[Dict[str, dict], str]:
     return payload, default_code
 
 
-# ===================== HEATMAP HELPERS =====================
+# ===================== HEATMAP & IC HELPERS =====================
 
 def _to_monthly_last(s: pd.Series) -> pd.Series:
-    # "ME" (month end) вместо устаревшего "M"
+    # month-end (НЕ 'M', чтобы избежать FutureWarning)
     return s.sort_index().resample("ME").last()
 
 
@@ -137,13 +146,15 @@ def load_macro_monthly(code: str) -> pd.Series:
     eng = get_engine()
     with eng.connect() as c:
         df = pd.read_sql(
-            text("""
+            text(
+                """
                 select o.ts, o.value
                 from core.observation o
                 join core.series s using(series_id)
                 where s.code=:code
                 order by o.ts
-            """),
+                """
+            ),
             c,
             params={"code": code},
         )
@@ -168,10 +179,46 @@ def build_heatmap_matrix(lag_min: int = -12, lag_max: int = 12, min_obs: int = 2
     return pd.DataFrame(rows, index=codes, columns=lags)
 
 
+def build_ic_payload(lag_min: int = -12, lag_max: int = 12, min_obs: int = 24) -> Dict[str, dict]:
+    """
+    Возвращает словарь: { CODE: { 'lags': [...], 'ic': [...] }, ... }
+    где ic[lag] = corr( next_ret, z.shift(lag) )
+    """
+    ret_m = load_spx_monthly_returns()
+    next_ret = ret_m.shift(-1)  # доходность следующего месяца
+    lags = list(range(lag_min, lag_max + 1))
+
+    payload: Dict[str, dict] = {}
+    for code in get_macro_codes_from_db():
+        m = load_macro_monthly(code)
+        if m.empty:
+            payload[code] = {"lags": lags, "ic": [np.nan] * len(lags)}
+            continue
+        z = _zscore(m)
+        vals = []
+        for L in lags:
+            aligned = pd.concat(
+                [next_ret.rename("ret_next"), z.shift(L).rename("macro")],
+                axis=1, join="inner"
+            ).dropna()
+            if len(aligned) < min_obs:
+                vals.append(np.nan)
+            else:
+                vals.append(float(aligned["ret_next"].corr(aligned["macro"])))
+        payload[code] = {"lags": lags, "ic": vals}
+    return payload
+
+
 # ===================== PLOTS =====================
 
-def build_timeseries_fig(spx_df: pd.DataFrame, spx_code: str, code: str,
-                         macro_payload: Dict[str, dict], use_z: bool = False, lag: int = 0):
+def build_timeseries_fig(
+    spx_df: pd.DataFrame,
+    spx_code: str,
+    code: str,
+    macro_payload: Dict[str, dict],
+    use_z: bool = False,
+    lag: int = 0,
+) -> go.Figure:
     """Базовая фигура: S&P (лог) + выбранный индикатор (лаг применим на JS-стороне)."""
     spx = spx_df.copy()
     spx["px"] = spx["px"].astype(float)
@@ -185,43 +232,55 @@ def build_timeseries_fig(spx_df: pd.DataFrame, spx_code: str, code: str,
     y_macro = m["z"] if use_z else m["raw"]
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=x_spx, y=y_spx, name=f"{spx_code} (log)", mode="lines",
-        line=dict(width=2.2)
-    ))
-    fig.add_trace(go.Scatter(
-        x=x_macro, y=y_macro, name=code + (" (z)" if use_z else ""),
-        mode="lines", line=dict(width=1.5), yaxis="y2"
-    ))
+    fig.add_trace(
+        go.Scatter(x=x_spx, y=y_spx, name=f"{spx_code} (log)", mode="lines", line=dict(width=2.2))
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x_macro,
+            y=y_macro,
+            name=code + (" (z)" if use_z else ""),
+            mode="lines",
+            line=dict(width=1.5),
+            yaxis="y2",
+        )
+    )
 
     fig.update_layout(
         title=f"{spx_code} (лог) и {code}" + (" (z-score)" if use_z else ""),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=60, r=60, t=70, b=40),
         xaxis=dict(title="Дата"),
-        # важное: никаких нестандартных значений rangemode
         yaxis=dict(title=f"log({spx_code})", tickformat=".2f"),
         yaxis2=dict(title=code, overlaying="y", side="right"),
         template="plotly_white",
         hovermode="x unified",
     )
-    # высоту не задаём — контейнеру зададим 70vh в CSS
     return fig
 
 
-def build_heatmap_fig(corr_mat: pd.DataFrame):
+def build_heatmap_fig(corr_mat: pd.DataFrame) -> go.Figure:
     x_vals = corr_mat.columns.tolist()
     y_vals = corr_mat.index.tolist()
     z_vals = corr_mat.values
 
     fig = go.Figure(
         data=go.Heatmap(
-            z=z_vals, x=x_vals, y=y_vals,
+            z=z_vals,
+            x=x_vals,
+            y=y_vals,
             colorscale=[
-                [0.0, "#313695"], [0.1, "#4575B4"], [0.2, "#74ADD1"],
-                [0.3, "#ABD9E9"], [0.4, "#E0F3F8"], [0.5, "#FFFFFF"],
-                [0.6, "#FEE090"], [0.7, "#FDAE61"], [0.8, "#F46D43"],
-                [0.9, "#D73027"], [1.0, "#A50026"],
+                [0.0, "#313695"],
+                [0.1, "#4575B4"],
+                [0.2, "#74ADD1"],
+                [0.3, "#ABD9E9"],
+                [0.4, "#E0F3F8"],
+                [0.5, "#FFFFFF"],
+                [0.6, "#FEE090"],
+                [0.7, "#FDAE61"],
+                [0.8, "#F46D43"],
+                [0.9, "#D73027"],
+                [1.0, "#A50026"],
             ],
             zmid=0.0,
             colorbar=dict(title="Корреляция"),
@@ -230,7 +289,10 @@ def build_heatmap_fig(corr_mat: pd.DataFrame):
     )
     fig.update_layout(
         title="Корреляция лог-доходностей S&P 500 с макро-индикаторами на лагах (месяцы)",
-        xaxis=dict(title="Лаг (месяцы)  —  <0: индикатор опережает  |  >0: запаздывает", dtick=2),
+        xaxis=dict(
+            title="Лаг (месяцы)  —  <0: индикатор опережает  |  >0: запаздывает",
+            dtick=2,
+        ),
         yaxis=dict(title="Индикатор"),
         margin=dict(l=120, r=50, t=70, b=60),
         template="plotly_white",
@@ -238,13 +300,35 @@ def build_heatmap_fig(corr_mat: pd.DataFrame):
     return fig
 
 
+def build_ic_fig(code: str, ic_payload: Dict[str, dict]) -> go.Figure:
+    item = ic_payload[code]
+    lags = item["lags"]
+    ic = item["ic"]
+
+    fig = go.Figure(go.Scatter(x=lags, y=ic, mode="lines+markers", name="IC"))
+    fig.add_hline(y=0, line=dict(width=1, dash="dot", color="#888"))
+
+    fig.update_layout(
+        title=f"Information Coefficient (next-month return) — {code}",
+        xaxis=dict(
+            title="Лаг (месяцы)  —  <0: индикатор опережает  |  >0: запаздывает",
+            dtick=2,
+        ),
+        yaxis=dict(title="IC", tickformat=".2f"),
+        margin=dict(l=70, r=40, t=60, b=50),
+        template="plotly_white",
+    )
+    return fig
+
+
 # ===================== HTML TEMPLATE =====================
 
-PAGE_TEMPLATE = Template(r"""<!doctype html>
+PAGE_TEMPLATE = Template(
+    r"""<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <title>Lead Macro Platform</title>
+  <title>DELTA TERMINAL - MVP</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
   <style>
@@ -256,10 +340,9 @@ PAGE_TEMPLATE = Template(r"""<!doctype html>
     .panel.active { display:block; }
     .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:8px 0 12px; }
     .muted { font-size:12px; opacity:.7; }
-    .plotly .gl-container .gl-error-message { display: none !important; }
-    /* Важное: заставляем графики занимать высоту окна */
-    #fig_timeseries, #fig_heatmap { height: 70vh; }
+    #fig_timeseries, #fig_heatmap, #fig_ic { height: 70vh; }
     #errorBox { color:#b00020; white-space: pre-wrap; background:#ffecec; border:1px solid #ffb3b3; padding:8px 10px; border-radius:8px; display:none; }
+    .plotly .gl-container .gl-error-message { display: none !important; }
   </style>
 </head>
 <body>
@@ -270,10 +353,10 @@ PAGE_TEMPLATE = Template(r"""<!doctype html>
   <div class="tabs">
     <div class="tab active" data-target="panel-timeseries">Timeseries</div>
     <div class="tab" data-target="panel-heatmap">Heatmap</div>
+    <div class="tab" data-target="panel-ic">IC</div>
     <div class="tab" data-target="panel-models">Models (soon)</div>
   </div>
 
-  <!-- Timeseries -->
   <div id="panel-timeseries" class="panel active">
     <div class="controls">
       <label>Индикатор:
@@ -285,123 +368,160 @@ PAGE_TEMPLATE = Template(r"""<!doctype html>
       <label>Лаг (мес): <span id="lagVal">0</span>
         <input type="range" id="lagRange" min="-12" max="12" step="1" value="0" style="vertical-align: middle; margin-left:8px;">
       </label>
-      <span class="muted">Лаг сдвигает макро.</span>
+      <span class="muted">Положительный лаг сдвигает макро вправо (позже).</span>
     </div>
     <div id="fig_timeseries"></div>
   </div>
 
-  <!-- Heatmap -->
   <div id="panel-heatmap" class="panel">
     <div id="fig_heatmap"></div>
   </div>
 
-  <!-- Models -->
+  <div id="panel-ic" class="panel">
+    <div class="controls">
+      <label for="icSelect">Индикатор:</label>
+      <select id="icSelect"></select>
+    </div>
+    <div id="fig_ic"></div>
+  </div>
+
   <div id="panel-models" class="panel">
     <p class="muted">Здесь появится переключатель моделей и метрики (Sharpe, hit-rate и т.д.).</p>
   </div>
 
-<script>
-  // ------------ helper: видимый вывод ошибок ------------
-  function showError(e) {
-    const box = document.getElementById('errorBox');
-    box.style.display = 'block';
-    box.textContent = (e && e.stack) ? e.stack : String(e);
-    console.error(e);
-  }
+  <script>
+    function showError(e) {
+      const box = document.getElementById('errorBox');
+      box.style.display = 'block';
+      box.textContent = (e && e.stack) ? e.stack : String(e);
+      console.error(e);
+    }
 
-  try {
-    // ------------ данные от Python ------------
-    const spxCode   = "${spx_code}";
-    const macroData = ${macro_payload_json};
-    const defaultCode = "${default_code}";
-    const tsFigureSpec = ${ts_fig_json};
-    const hmFigureSpec = ${hm_fig_json};
+    try {
+      const spxCode      = "${spx_code}";
+      const macroData    = ${macro_payload_json};
+      const defaultCode  = "${default_code}";
+      const tsFigureSpec = ${ts_fig_json};
+      const hmFigureSpec = ${hm_fig_json};
+      const icPayload    = ${ic_payload_json};
+      const icFigureSpec = ${ic_fig_json};
 
-    // ------------ вкладки ------------
-    document.querySelectorAll('.tab').forEach(t => {
-      t.addEventListener('click', () => {
-        document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-        t.classList.add('active');
-        document.getElementById(t.dataset.target).classList.add('active');
-        if (t.dataset.target === 'panel-heatmap' && !window.__hmRendered) {
-          try {
+      // ----- вкладки -----
+      document.querySelectorAll('.tab').forEach(t => {
+        t.addEventListener('click', () => {
+          document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+          document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+          t.classList.add('active');
+          document.getElementById(t.dataset.target).classList.add('active');
+
+          if (t.dataset.target === 'panel-heatmap' && !window.__hmRendered) {
             Plotly.newPlot('fig_heatmap', hmFigureSpec.data, hmFigureSpec.layout, {responsive:true});
             window.__hmRendered = true;
-          } catch (e) { showError(e); }
-        }
-      });
-    });
-
-    // ------------ timeseries ------------
-    // заполняем селект
-    const sel = document.getElementById('macroSelect');
-    Object.keys(macroData).sort().forEach(code => {
-      const opt = document.createElement('option');
-      opt.value = code; opt.textContent = code;
-      if (code === defaultCode) opt.selected = true;
-      sel.appendChild(opt);
-    });
-
-    // первый рендер тайм-серии
-    Plotly.newPlot('fig_timeseries', tsFigureSpec.data, tsFigureSpec.layout, {responsive:true});
-
-    function addMonthsISO(iso, m) {
-      const d = new Date(iso);
-      let year = d.getUTCFullYear();
-      let month = d.getUTCMonth();
-      const day = d.getUTCDate();
-      month += m; year += Math.floor(month/12); month = ((month%12)+12)%12;
-      const nd = new Date(Date.UTC(year, month, 1));
-      const daysInMonth = new Date(Date.UTC(year, month+1, 0)).getUTCDate();
-      nd.setUTCDate(Math.min(day, daysInMonth));
-      return nd.toISOString();
-    }
-    function withLag(tsArr, m){ if(!m) return tsArr; return tsArr.map(t => addMonthsISO(t, m)); }
-
-    function currentState() {
-      const code = sel.value;
-      const z = document.getElementById('normChk').checked;
-      const lag = parseInt(document.getElementById('lagRange').value, 10) || 0;
-      return { code, z, lag };
-    }
-    function legendName(st) {
-      const suffix = [];
-      if (st.z) suffix.push('z');
-      if (st.lag) suffix.push('lag ' + (st.lag>0? '+'+st.lag: st.lag) + 'm');
-      return st.code + (suffix.length? ' ('+suffix.join(', ')+')' : '');
-    }
-    function applyState(st) {
-      const rec = macroData[st.code]; if(!rec) return;
-      const y = st.z ? rec.z : rec.raw;
-      const x = withLag(rec.ts, st.lag);
-      const nm = legendName(st);
-      try {
-        // trace 0 = SPX, trace 1 = макро
-        Plotly.restyle('fig_timeseries', { x:[x], y:[y], name:[nm], 'yaxis':['y2'] }, [1]);
-        Plotly.relayout('fig_timeseries', {
-          'title.text': spxCode + ' (лог) и ' + nm,
-          'yaxis2.title.text': st.code + (st.z ? ' (z-score)' : '')
+          }
+          if (t.dataset.target === 'panel-ic' && !window.__icRendered) {
+            Plotly.newPlot('fig_ic', icFigureSpec.data, icFigureSpec.layout, {responsive:true});
+            window.__icRendered = true;
+            updateIC(icSelect.value);
+          }
         });
-        document.getElementById('lagVal').textContent = String(st.lag);
-      } catch (e) { showError(e); }
+      });
+
+      // ----- селект Timeseries -----
+      const sel = document.getElementById('macroSelect');
+      Object.keys(macroData).sort().forEach(code => {
+        const opt = document.createElement('option');
+        opt.value = code; opt.textContent = code;
+        if (code === defaultCode) opt.selected = true;
+        sel.appendChild(opt);
+      });
+
+      // ----- селект IC -----
+      const icSelect = document.getElementById("icSelect");
+      Object.keys(macroData).sort().forEach(code => {
+        const opt = document.createElement("option");
+        opt.value = code;
+        opt.textContent = code;
+        icSelect.appendChild(opt);
+      });
+      icSelect.value = defaultCode;
+      icSelect.addEventListener("change", () => {
+        updateIC(icSelect.value);
+      });
+
+      // ----- первичная отрисовка ряда -----
+      Plotly.newPlot('fig_timeseries', tsFigureSpec.data, tsFigureSpec.layout, {responsive:true});
+
+      // ======= JS utils =======
+      function addMonthsISO(iso, m) {
+        const d = new Date(iso);
+        let year = d.getUTCFullYear();
+        let month = d.getUTCMonth();
+        const day = d.getUTCDate();
+        month += m; year += Math.floor(month/12); month = ((month%12)+12)%12;
+        const nd = new Date(Date.UTC(year, month, 1));
+        const daysInMonth = new Date(Date.UTC(year, month+1, 0)).getUTCDate();
+        nd.setUTCDate(Math.min(day, daysInMonth));
+        return nd.toISOString();
+      }
+      function withLag(tsArr, m){ if(!m) return tsArr; return tsArr.map(t => addMonthsISO(t, m)); }
+
+      function currentState() {
+        const code = sel.value;
+        const z = document.getElementById('normChk').checked;
+        const lag = parseInt(document.getElementById('lagRange').value, 10) || 0;
+        return { code, z, lag };
+      }
+      function legendName(st) {
+        const suffix = [];
+        if (st.z) suffix.push('z');
+        if (st.lag) suffix.push('lag ' + (st.lag>0? '+'+st.lag: st.lag) + 'm');
+        return st.code + (suffix.length? ' ('+suffix.join(', ')+')' : '');
+      }
+      function applyState(st) {
+        const rec = macroData[st.code]; if(!rec) return;
+        const y = st.z ? rec.z : rec.raw;
+        const x = withLag(rec.ts, st.lag);
+        const nm = legendName(st);
+        try {
+          // trace 0 = SPX, trace 1 = макро
+          Plotly.restyle('fig_timeseries', { x:[x], y:[y], name:[nm], 'yaxis':['y2'] }, [1]);
+          Plotly.relayout('fig_timeseries', {
+            'title.text': spxCode + ' (лог) и ' + nm,
+            'yaxis2.title.text': st.code + (st.z ? ' (z-score)' : '')
+          });
+          document.getElementById('lagVal').textContent = String(st.lag);
+        } catch (e) { showError(e); }
+      }
+
+      function updateIC(code){
+        const item = icPayload[code];
+        if (!item) return;
+        if (!window.__icRendered) return; // вкладка IC ещё не открыта
+        try {
+          Plotly.react('fig_ic', [{ x: item.lags, y: item.ic, mode: 'lines+markers', name: 'IC' }], {
+            ...icFigureSpec.layout,
+            title: {text: 'Information Coefficient (next-month return) — ' + code}
+          }, {responsive:true});
+        } catch(e){ showError(e); }
+      }
+
+      // события UI
+      sel.addEventListener('change', ()=>{ const st=currentState(); applyState(st); });
+      document.getElementById('normChk').addEventListener('change', ()=>applyState(currentState()));
+      document.getElementById('lagRange').addEventListener('input', ()=>applyState(currentState()));
+
+      // стартовое состояние
+      applyState(currentState());
+
+    } catch (e) {
+      showError(e);
     }
-
-    sel.addEventListener('change', ()=>applyState(currentState()));
-    document.getElementById('normChk').addEventListener('change', ()=>applyState(currentState()));
-    document.getElementById('lagRange').addEventListener('input', ()=>applyState(currentState()));
-
-    // стартовое состояние
-    applyState(currentState());
-
-  } catch (e) {
-    showError(e);
-  }
-</script>
+  </script>
 
 </body>
 </html>
-""")
+"""
+)
 
 
 # ===================== MAIN =====================
@@ -419,6 +539,10 @@ def main():
     hm_fig = build_heatmap_fig(corr_mat)
     hm_fig_spec = json.loads(hm_fig.to_json())
 
+    ic_payload = build_ic_payload(lag_min=-12, lag_max=12, min_obs=24)
+    ic_first_fig = build_ic_fig(default_code, ic_payload)
+    ic_fig_spec = json.loads(ic_first_fig.to_json())
+
     # сборка html
     os.makedirs("output", exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -426,10 +550,12 @@ def main():
 
     html = PAGE_TEMPLATE.substitute(
         spx_code=spx_code,
-        macro_payload_json=json.dumps(macro_payload),
+        macro_payload_json=json.dumps(macro_payload, ensure_ascii=False),
         default_code=default_code,
-        ts_fig_json=json.dumps(ts_fig_spec),
-        hm_fig_json=json.dumps(hm_fig_spec),
+        ts_fig_json=json.dumps(ts_fig_spec, ensure_ascii=False),
+        hm_fig_json=json.dumps(hm_fig_spec, ensure_ascii=False),
+        ic_payload_json=json.dumps(ic_payload, ensure_ascii=False),
+        ic_fig_json=json.dumps(ic_fig_spec, ensure_ascii=False),
     )
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
